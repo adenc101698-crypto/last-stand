@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Last Guard — FPS Mini Game</title>
+<style>
+  *{box-sizing:border-box} body{margin:0;background:#101820;color:#edf4f7;font-family:system-ui,Segoe UI,Arial;display:flex;min-height:100vh;align-items:center;justify-content:center}
+  #wrap{width:min(100vw,1000px);padding:14px} h1{font-size:22px;margin:0 0 8px} #hud{display:flex;gap:18px;flex-wrap:wrap;margin:8px 0;font-weight:700}
+  #game{display:block;width:100%;aspect-ratio:16/9;background:#151c22;border:2px solid #4b6574;cursor:crosshair}
+  #help{font-size:13px;color:#c3d3dc;line-height:1.5;margin-top:8px} button{background:#43b6a7;color:#081b20;border:0;border-radius:8px;padding:9px 14px;font-weight:800;cursor:pointer}
+  .bar{display:inline-block;width:120px;height:10px;background:#3b454b;border-radius:8px;overflow:hidden;vertical-align:middle}.fill{height:100%;background:#4be08d;width:100%}
+  #overlay{position:fixed;inset:0;background:#071018dd;display:flex;align-items:center;justify-content:center;padding:20px}
+  #panel{max-width:470px;background:#182832;border:1px solid #547080;border-radius:16px;padding:24px;text-align:center;box-shadow:0 20px 70px #0009}
+  #panel h2{margin:0 0 8px;font-size:28px} #panel p{line-height:1.5;color:#d1e0e7} .small{font-size:12px;color:#9fb3bd}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>LAST GUARD <span style="color:#43b6a7">/ FPS MINI GAME</span></h1>
+  <div id="hud">
+    <span>Health: <span id="health">100</span> <span class="bar"><span id="healthbar" class="fill" style="display:block"></span></span></span>
+    <span>Ammo: <span id="ammo">12</span> / ∞</span>
+    <span>Bot: <span id="bothealth">100</span>%</span>
+    <span id="status">Defend the control point!</span>
+  </div>
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="help"><b>Controls:</b> Click the game to lock mouse · WASD move · Mouse look · Left-click shoot · R reload · Shift sprint · Esc unlocks mouse. Eliminate the defending bot before it gets you!</div>
+</div>
+<div id="overlay"><div id="panel"><h2>LAST GUARD</h2><p>You are attacking a guarded control point. The bot protects its base, tracks you, and fires back when it has a clear shot.</p><p><b>WASD</b> move · <b>Mouse</b> aim · <b>Click</b> shoot · <b>R</b> reload</p><button id="start">START GAME</button><p class="small">Arcade-style fictional shooter. No downloads needed.</p></div></div>
+<script>
+(() => {
+const canvas=document.getElementById('game'), ctx=canvas.getContext('2d');
+const W=canvas.width,H=canvas.height, FOV=Math.PI/2.8, MAX=20;
+const healthEl=document.getElementById('health'), hb=document.getElementById('healthbar'), ammoEl=document.getElementById('ammo'), bhEl=document.getElementById('bothealth'), statusEl=document.getElementById('status'), overlay=document.getElementById('overlay');
+const map=[
+"1111111111111111",
+"1000000000000001",
+"1020001000002001",
+"1000001000000001",
+"1000000000000001",
+"1001100000110001",
+"1000000000000001",
+"1000000000000001",
+"1000110001100001",
+"1000000000000001",
+"1000000000000001",
+"1020000000002001",
+"1000000000000001",
+"1111111111111111"
+];
+let player,bot,keys={},depth=[],ammo=12,health=100,botHealth=100,reload=0,shotFlash=0,botCooldown=0,gameOver=false,won=false,locked=false,last=0,moveTime=0;
+const tile=(x,y)=>{let row=map[Math.floor(y)];return !row || row[Math.floor(x)]!=='0' && row[Math.floor(x)]!=='2';};
+function reset(){player={x:2.5,y:2.5,a:0.05};bot={x:12.5,y:10.5,a:Math.PI,stun:0};ammo=12;health=100;botHealth=100;reload=0;shotFlash=0;botCooldown=1;gameOver=false;won=false;keys={};}
+function norm(a){while(a>Math.PI)a-=Math.PI*2;while(a<-Math.PI)a+=Math.PI*2;return a}
+function ray(px,py,a){let d=0;while(d<MAX){d+=0.035;if(tile(px+Math.cos(a)*d,py+Math.sin(a)*d))return d;}return MAX}
+function clearPath(x1,y1,x2,y2){let dx=x2-x1,dy=y2-y1,n=Math.ceil(Math.hypot(dx,dy)/.12);for(let i=1;i<n;i++){let x=x1+dx*i/n,y=y1+dy*i/n;if(tile(x,y))return false;}return true}
+function move(ent,dx,dy){if(!tile(ent.x+dx,ent.y))ent.x+=dx;if(!tile(ent.x,ent.y+dy))ent.y+=dy}
+function start(){reset();overlay.style.display='none';canvas.requestPointerLock?.();last=performance.now();requestAnimationFrame(loop)}
+document.getElementById('start').onclick=start;
+document.addEventListener('pointerlockchange',()=>{locked=document.pointerLockElement===canvas;});
+document.addEventListener('mousemove',e=>{if(locked&&!gameOver)player.a+=e.movementX*.0025;});
+document.addEventListener('keydown',e=>{keys[e.code]=true;if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();if(e.code==='KeyR')doReload();if(e.code==='Escape'&&gameOver)showEnd();});
+document.addEventListener('keyup',e=>keys[e.code]=false);
+canvas.addEventListener('click',()=>{if(!locked&&!gameOver)canvas.requestPointerLock?.();else shoot();});
+function doReload(){if(ammo<12&&reload<=0&&!gameOver){reload=1.15;statusEl.textContent='Reloading…';}}
+function shoot(){if(gameOver||reload>0)return;if(ammo<=0){doReload();return;}ammo--;shotFlash=.09;ammoEl.textContent=ammo;
+ const ang=norm(Math.atan2(bot.y-player.y,bot.x-player.x)-player.a);
+ const dist=Math.hypot(bot.x-player.x,bot.y-player.y);
+ const aim=norm(Math.atan2(bot.y-player.y,bot.x-player.x)-player.a);
+ if(Math.abs(aim)<.105&&dist<ray(player.x,player.y,player.a)+.1&&clearPath(player.x,player.y,bot.x,bot.y)){
+   botHealth=Math.max(0,botHealth-25);bot.stun=.18;statusEl.textContent='HIT!';if(botHealth===0){won=true;gameOver=true;showEnd();}
+ } else statusEl.textContent='Miss — line up the crosshair!';
+}
+function update(dt){
+ if(gameOver)return;
+ if(reload>0){reload-=dt;if(reload<=0){ammo=12;ammoEl.textContent=ammo;statusEl.textContent='Defend the control point!';}}
+ if(shotFlash>0)shotFlash-=dt;
+ let speed=(keys.ShiftLeft||keys.ShiftRight)?4.1:2.7,dx=0,dy=0;
+ if(keys.KeyW||keys.ArrowUp){dx+=Math.cos(player.a)*speed*dt;dy+=Math.sin(player.a)*speed*dt}
+ if(keys.KeyS||keys.ArrowDown){dx-=Math.cos(player.a)*speed*dt;dy-=Math.sin(player.a)*speed*dt}
+ if(keys.KeyA){dx+=Math.cos(player.a-Math.PI/2)*speed*dt;dy+=Math.sin(player.a-Math.PI/2)*speed*dt}
+ if(keys.KeyD){dx+=Math.cos(player.a+Math.PI/2)*speed*dt;dy+=Math.sin(player.a+Math.PI/2)*speed*dt}
+ move(player,dx,dy);
+ // Bot guards its position but turns to track the player and strafes occasionally.
+ const target=Math.atan2(player.y-bot.y,player.x-bot.x);bot.a+=norm(target-bot.a)*Math.min(1,dt*2.8);
+ bot.stun=Math.max(0,bot.stun-dt);botCooldown-=dt;
+ const dist=Math.hypot(player.x-bot.x,player.y-bot.y);
+ if(dist<9&&clearPath(bot.x,bot.y,player.x,player.y)&&botCooldown<=0){
+   health=Math.max(0,health-8);botCooldown=1.05+Math.random()*.35;statusEl.textContent='The bot hit you!';
+   if(health<=0){gameOver=true;won=false;showEnd();}
+ }
+ healthEl.textContent=health;hb.style.width=health+'%';hb.style.background=health<30?'#ff5a5a':'#4be08d';bhEl.textContent=botHealth;
+}
+function render(){
+ // sky and floor
+ let sky=ctx.createLinearGradient(0,0,0,H/2);sky.addColorStop(0,'#152735');sky.addColorStop(1,'#354b58');ctx.fillStyle=sky;ctx.fillRect(0,0,W,H/2);
+ let floor=ctx.createLinearGradient(0,H/2,0,H);floor.addColorStop(0,'#3b4547');floor.addColorStop(1,'#151b1d');ctx.fillStyle=floor;ctx.fillRect(0,H/2,W,H/2);
+ for(let x=0;x<W;x++){let a=player.a+(x/W-.5)*FOV,d=ray(player.x,player.y,a)*Math.cos(a-player.a);depth[x]=d;let wallH=Math.min(H,H/(d+.001)*.78),shade=Math.max(35,155-d*10);ctx.fillStyle=`rgb(${shade*.62|0},${shade*.79|0},${shade|0})`;ctx.fillRect(x,(H-wallH)/2,1,wallH);}
+ // control point
+ const bx=bot.x-player.x,by=bot.y-player.y,dist=Math.hypot(bx,by),angle=norm(Math.atan2(by,bx)-player.a);
+ if(Math.abs(angle)<FOV/2+.3&&dist<MAX){
+   const sx=W/2+Math.tan(angle)/(Math.tan(FOV/2))*W/2,scale=H/(dist+.15)*.62;
+   if(sx>-100&&sx<W+100&&dist<depth[Math.max(0,Math.min(W-1,Math.floor(sx)))] +.25){
+    const bw=scale*.52,bh=scale*.85,sy=H/2-bh*.45;
+    // bot body
+    ctx.fillStyle='#10191f';ctx.fillRect(sx-bw*.5,sy,bw,bh);
+    ctx.fillStyle='#b74c43';ctx.fillRect(sx-bw*.42,sy+bh*.1,bw*.84,bh*.43);
+    ctx.fillStyle='#e0b7a0';ctx.fillRect(sx-bw*.25,sy-bh*.17,bw*.5,bh*.25);
+    ctx.fillStyle='#1b252c';ctx.fillRect(sx-bw*.3,sy-bh*.07,bw*.6,bh*.08);
+    ctx.fillStyle='#ffdc74';ctx.fillRect(sx-bw*.17,sy-bh*.04,bw*.09,bh*.04);ctx.fillRect(sx+bw*.08,sy-bh*.04,bw*.09,bh*.04);
+    ctx.fillStyle='#333d43';ctx.fillRect(sx-bw*.45,sy+bh*.88,bw*.35,bh*.18);ctx.fillRect(sx+bw*.1,sy+bh*.88,bw*.35,bh*.18);
+    // health strip
+    ctx.fillStyle='#182026';ctx.fillRect(sx-bw*.5,sy-bh*.29,bw,5);ctx.fillStyle='#ff5b52';ctx.fillRect(sx-bw*.5,sy-bh*.29,bw*botHealth/100,5);
+    if(bot.stun>0){ctx.strokeStyle='#ffe17b';ctx.lineWidth=3;ctx.strokeRect(sx-bw*.58,sy-bh*.2,bw*1.16,bh*1.22);}
+   }
+ }
+ // crosshair
+ ctx.strokeStyle='#d7f6e8';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(W/2-10,H/2);ctx.lineTo(W/2-3,H/2);ctx.moveTo(W/2+3,H/2);ctx.lineTo(W/2+10,H/2);ctx.moveTo(W/2,H/2-10);ctx.lineTo(W/2,H/2-3);ctx.moveTo(W/2,H/2+3);ctx.lineTo(W/2,H/2+10);ctx.stroke();
+ if(shotFlash>0){ctx.fillStyle='#fff1b8';ctx.beginPath();ctx.moveTo(W/2,H*.69);ctx.lineTo(W*.55,H*.84);ctx.lineTo(W*.52,H*.78);ctx.lineTo(W*.48,H*.78);ctx.lineTo(W*.45,H*.84);ctx.closePath();ctx.fill();}
+ // subtle vignette
+ let vg=ctx.createRadialGradient(W/2,H/2,100,W/2,H/2,600);vg.addColorStop(0,'#0000');vg.addColorStop(1,'#0008');ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
+}
+function showEnd(){document.exitPointerLock?.();overlay.style.display='flex';document.getElementById('panel').innerHTML=`<h2>${won?'CONTROL POINT SECURED!':'MISSION FAILED'}</h2><p>${won?'You defeated the defending bot. Nice shooting!':'The defending bot won this round. Try moving between cover and aiming carefully.'}</p><p><b>Final stats</b><br>Health: ${health} · Bot health: ${botHealth}%</p><button id="again">PLAY AGAIN</button>`;document.getElementById('again').onclick=start;}
+function loop(now){if(gameOver)return;const dt=Math.min(.04,(now-last)/1000||0);last=now;update(dt);render();requestAnimationFrame(loop)}
+reset();render();
+})();
+</script>
+</body>
+</html>
